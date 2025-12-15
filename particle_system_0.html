@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Particle System with Mouse Control</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; cursor: none; }
+        canvas { display: block; }
+        #gui-container { position: fixed; top: 0; right: 0; z-index: 100; }
+        #status-message {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #4CAF50;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            z-index: 150;
+            text-align: center;
+        }
+        #mouse-cursor {
+            position: fixed;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ff00ff;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            transition: transform 0.1s ease;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dat.gui@0.7.9/build/dat.gui.min.js"></script>
+
+</head>
+<body>
+    <div id="gui-container"></div>
+    <div id="status-message">Move mouse UP to expand | Move DOWN to shrink | Scroll to scale</div>
+    <div id="mouse-cursor"></div>
+    
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let particleSystem;
+        let positions;
+        const particleCount = 20000;
+        let currentTemplate = 'Heart';
+
+        // Mouse/Gesture State
+        let currentScaleFactor = 1.0;
+        let targetScaleFactor = 1.0;
+        const MIN_SCALE = 0.5;
+        const MAX_SCALE = 6.0;
+        
+        // Mouse tracking
+        let mouseY = 0;
+        let mouseX = 0;
+        let isMouseDown = false;
+
+        // UI Parameters
+        const params = {
+            template: currentTemplate,
+            particleColor: '#ff00ff',
+            particleSize: 0.05,
+            currentScale: 1.0,
+            controlMode: 'Mouse Y Position'
+        };
+
+        // --- Core Functions ---
+
+        /**
+         * Initializes the Three.js scene, camera, and renderer.
+         */
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 10;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        /**
+         * Generates particle positions based on the selected template.
+         */
+        function generatePositions(template) {
+            positions = new Float32Array(particleCount * 3);
+            
+            for (let i = 0; i < particleCount; i++) {
+                const i3 = i * 3;
+                let x = 0, y = 0, z = 0;
+
+                switch (template) {
+                    case 'Heart': {
+                        // Parametric equation for a heart (2D projection, slightly randomized)
+                        const t = Math.random() * Math.PI * 2;
+                        const r = 2.5 + Math.random() * 0.5;
+                        x = r * (16 * Math.sin(t) ** 3);
+                        y = r * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+                        z = (Math.random() - 0.5) * 40; // Spread on Z-axis
+                        
+                        // Normalize the shape to a smaller scale
+                        x /= 50; 
+                        y /= 50;
+                        break;
+                    }
+                        
+                    case 'Saturn': {
+                        // Sphere (Planet)
+                        if (i < particleCount * 0.4) {
+                            const radius = 2;
+                            const phi = Math.acos(Math.random() * 2 - 1);
+                            const theta = Math.random() * Math.PI * 2;
+                            x = radius * Math.sin(phi) * Math.cos(theta);
+                            y = radius * Math.sin(phi) * Math.sin(theta);
+                            z = radius * Math.cos(phi);
+                        } else { 
+                            // Torus/Disc (Ring)
+                            const innerR = 3;
+                            const outerR = 5;
+                            const ringR = innerR + Math.random() * (outerR - innerR);
+                            const theta = Math.random() * Math.PI * 2;
+                            x = ringR * Math.cos(theta);
+                            y = (Math.random() - 0.5) * 0.1; // Flat ring
+                            z = ringR * Math.sin(theta);
+                        }
+                        break;
+                    }
+
+                    case 'Fireworks': {
+                        // Initial cluster for explosion
+                        const radius = Math.random() * 0.2; 
+                        const phi = Math.acos(Math.random() * 2 - 1);
+                        const theta = Math.random() * Math.PI * 2;
+                        x = radius * Math.sin(phi) * Math.cos(theta);
+                        y = radius * Math.sin(phi) * Math.sin(theta);
+                        z = radius * Math.cos(phi) + 5;
+                        break;
+                    }
+
+                    case 'Flower': {
+                        // Simple flower pattern using polar coordinates
+                        const petals = 8;
+                        const angle = Math.random() * Math.PI * 2;
+                        const petalRadius = Math.abs(Math.sin(petals * angle));
+                        const dist = Math.random() * 3 * petalRadius;
+                        x = dist * Math.cos(angle);
+                        y = dist * Math.sin(angle);
+                        z = (Math.random() - 0.5) * 0.5;
+                        break;
+                    }
+
+                    case 'Buddha Statue': {
+                        // Buddha-like silhouette using vertical distribution
+                        const height = (Math.random() - 0.5) * 8;
+                        const bodyWidth = Math.max(0, 2 - Math.abs(height) * 0.2);
+                        const rad = Math.random() * bodyWidth;
+                        const ang = Math.random() * Math.PI * 2;
+                        x = rad * Math.cos(ang);
+                        y = height;
+                        z = rad * Math.sin(ang);
+                        break;
+                    }
+
+                    default: {
+                        // Default Sphere
+                        const r = Math.random() * 5;
+                        const p = Math.acos(Math.random() * 2 - 1);
+                        const th = Math.random() * Math.PI * 2;
+                        x = r * Math.sin(p) * Math.cos(th);
+                        y = r * Math.sin(p) * Math.sin(th);
+                        z = r * Math.cos(p);
+                        break;
+                    }
+                }
+
+                positions[i3] = x;
+                positions[i3 + 1] = y;
+                positions[i3 + 2] = z;
+            }
+            return positions;
+        }
+
+        /**
+         * Initializes or updates the particle system with new positions and material.
+         */
+        function updateParticleSystem(newTemplate = currentTemplate) {
+            currentTemplate = newTemplate;
+            const newPositions = generatePositions(currentTemplate);
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+
+            const material = new THREE.PointsMaterial({
+                color: new THREE.Color(params.particleColor),
+                size: params.particleSize,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            // Proper cleanup of old system
+            if (particleSystem) {
+                scene.remove(particleSystem);
+                if (particleSystem.geometry) {
+                    particleSystem.geometry.dispose();
+                }
+                if (particleSystem.material) {
+                    particleSystem.material.dispose();
+                }
+            }
+            
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        /**
+         * Initializes the dat.GUI control panel.
+         */
+        function initGUI() {
+            const gui = new dat.GUI({ autoPlace: false });
+            document.getElementById('gui-container').appendChild(gui.domElement);
+
+            // Template Selector
+            gui.add(params, 'template', ['Heart', 'Saturn', 'Fireworks', 'Flower', 'Buddha Statue']).name('Template').onChange(value => {
+                updateParticleSystem(value);
+            });
+
+            // Color Selector
+            gui.addColor(params, 'particleColor').name('Color').onChange(value => {
+                if (particleSystem) {
+                    particleSystem.material.color.set(value);
+                }
+            });
+
+            // Size Control
+            gui.add(params, 'particleSize', 0.01, 0.5).name('Size').onChange(value => {
+                if (particleSystem) {
+                    particleSystem.material.size = value;
+                }
+            });
+
+            // Control Mode
+            gui.add(params, 'controlMode', ['Mouse Y Position', 'Click & Drag', 'Scroll Wheel']).name('Control Mode').onChange(value => {
+                updateStatusMessage();
+            });
+
+            // Scale Visualizer
+            gui.add(params, 'currentScale', MIN_SCALE, MAX_SCALE).name('Current Scale').listen();
+        }
+
+        // --- Mouse Tracking Integration ---
+
+        /**
+         * Update status message based on control mode
+         */
+        function updateStatusMessage() {
+            const statusDiv = document.getElementById('status-message');
+            switch(params.controlMode) {
+                case 'Mouse Y Position':
+                    statusDiv.textContent = 'Move mouse UP to expand | Move DOWN to shrink';
+                    break;
+                case 'Click & Drag':
+                    statusDiv.textContent = 'Click and drag UP to expand | Drag DOWN to shrink';
+                    break;
+                case 'Scroll Wheel':
+                    statusDiv.textContent = 'Scroll UP to expand | Scroll DOWN to shrink';
+                    break;
+            }
+        }
+
+        /**
+         * Initialize mouse tracking
+         */
+        function initMouseTracking() {
+            const cursor = document.getElementById('mouse-cursor');
+
+            // Mouse move
+            document.addEventListener('mousemove', (e) => {
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+
+                // Update cursor position
+                cursor.style.left = mouseX + 'px';
+                cursor.style.top = mouseY + 'px';
+
+                // Calculate scale based on control mode
+                if (params.controlMode === 'Mouse Y Position') {
+                    // Top of screen = MAX_SCALE, Bottom = MIN_SCALE
+                    const normalizedY = 1 - (mouseY / window.innerHeight);
+                    targetScaleFactor = MIN_SCALE + (normalizedY * (MAX_SCALE - MIN_SCALE));
+                } else if (params.controlMode === 'Click & Drag' && isMouseDown) {
+                    const normalizedY = 1 - (mouseY / window.innerHeight);
+                    targetScaleFactor = MIN_SCALE + (normalizedY * (MAX_SCALE - MIN_SCALE));
+                }
+            });
+
+            // Mouse down
+            document.addEventListener('mousedown', (e) => {
+                isMouseDown = true;
+                cursor.style.borderColor = '#00ffff';
+                cursor.style.transform = 'scale(1.5)';
+            });
+
+            // Mouse up
+            document.addEventListener('mouseup', (e) => {
+                isMouseDown = false;
+                cursor.style.borderColor = '#ff00ff';
+                cursor.style.transform = 'scale(1)';
+                
+                if (params.controlMode === 'Click & Drag') {
+                    // Return to default scale when released
+                    targetScaleFactor = 1.0;
+                }
+            });
+
+            // Mouse wheel
+            document.addEventListener('wheel', (e) => {
+                if (params.controlMode === 'Scroll Wheel') {
+                    e.preventDefault();
+                    
+                    // Scroll up = increase, scroll down = decrease
+                    const delta = -e.deltaY * 0.001;
+                    targetScaleFactor = Math.max(MIN_SCALE, Math.min(MAX_SCALE, targetScaleFactor + delta));
+                }
+            }, { passive: false });
+
+            // Mouse leave - reset if in click & drag mode
+            document.addEventListener('mouseleave', () => {
+                if (params.controlMode === 'Click & Drag') {
+                    isMouseDown = false;
+                    targetScaleFactor = 1.0;
+                }
+            });
+        }
+
+        // --- Event Handlers & Loop ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Smooth scale transition
+            currentScaleFactor += (targetScaleFactor - currentScaleFactor) * 0.1;
+            params.currentScale = currentScaleFactor;
+
+            if (particleSystem) {
+                // 1. Apply Mouse Scaling
+                particleSystem.scale.set(currentScaleFactor, currentScaleFactor, currentScaleFactor);
+
+                // 2. Add rotation for visual interest
+                particleSystem.rotation.y += 0.001;
+                particleSystem.rotation.x += 0.0005;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Initialization Sequence ---
+        try {
+            initThree();
+            initGUI();
+            updateParticleSystem(currentTemplate); // Initial creation
+            initMouseTracking();
+            animate(); // Start the render loop
+            
+            // Hide status message after 5 seconds
+            setTimeout(() => {
+                document.getElementById('status-message').style.opacity = '0.3';
+            }, 5000);
+        } catch (error) {
+            console.error('Initialization error:', error);
+            alert('Failed to initialize the application: ' + error.message);
+        }
+    </script>
+</body>
+</html>
