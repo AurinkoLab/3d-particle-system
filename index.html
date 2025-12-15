@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Particle System - Robust Loading</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; cursor: none; }
+        canvas { display: block; }
+        #gui-container { position: fixed; top: 0; right: 0; z-index: 100; }
+        #camera-feed {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+        }
+        #status-message {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #4CAF50;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            z-index: 150;
+            text-align: center;
+            max-width: 600px;
+        }
+        #mouse-cursor {
+            position: fixed;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #1931bf;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            transition: transform 0.1s ease;
+        }
+        #diagnostics {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.9);
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 11px;
+            z-index: 200;
+            max-width: 350px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .button-group {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            z-index: 150;
+        }
+        .control-btn {
+            background: #1931bf;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .control-btn:hover {
+            background: #2541d9;
+        }
+        .control-btn:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="gui-container"></div>
+    <video id="camera-feed" playsinline></video>
+    <div id="status-message">Initializing...</div>
+    <div id="mouse-cursor"></div>
+    <div class="button-group">
+        <button id="enable-camera-btn" class="control-btn" style="display:none;">Enable Hand Tracking</button>
+        <button id="hide-diagnostics-btn" class="control-btn">Hide Debug Info</button>
+    </div>
+    <div id="diagnostics"></div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dat.gui@0.7.9/build/dat.gui.min.js"></script>
+    
+    <script>
+        // --- Diagnostic System ---
+        const diagnostics = document.getElementById('diagnostics');
+        let logCount = 0;
+        
+        function log(message, type = 'info') {
+            logCount++;
+            console.log(`[${type.toUpperCase()}] ${message}`);
+            const color = type === 'error' ? '#ff4444' : 
+                         type === 'success' ? '#00ff00' : 
+                         type === 'warning' ? '#ffaa00' : '#88ccff';
+            const time = new Date().toLocaleTimeString();
+            diagnostics.innerHTML += `<div style="color:${color}">[${time}] ${message}</div>`;
+            diagnostics.scrollTop = diagnostics.scrollHeight;
+        }
+
+        // Toggle diagnostics
+        document.getElementById('hide-diagnostics-btn').addEventListener('click', function() {
+            if (diagnostics.style.display === 'none') {
+                diagnostics.style.display = 'block';
+                this.textContent = 'Hide Debug Info';
+            } else {
+                diagnostics.style.display = 'none';
+                this.textContent = 'Show Debug Info';
+            }
+        });
+
+        log('=== INITIALIZATION STARTED ===');
+        log(`Browser: ${navigator.userAgent}`, 'info');
+        log(`Protocol: ${window.location.protocol}`, 'info');
+
+        // Test if we can load external scripts
+        async function testNetworkConnectivity() {
+            log('Testing network connectivity...');
+            try {
+                const response = await fetch('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469476/package.json', {
+                    method: 'HEAD',
+                    cache: 'no-cache'
+                });
+                if (response.ok) {
+                    log('✓ Network connection OK', 'success');
+                    return true;
+                } else {
+                    log(`✗ Network response: ${response.status}`, 'error');
+                    return false;
+                }
+            } catch (error) {
+                log(`✗ Network test failed: ${error.message}`, 'error');
+                return false;
+            }
+        }
+
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let particleSystem;
+        let positions;
+        const particleCount = 20000;
+        let currentTemplate = 'Heart';
+
+        let currentScaleFactor = 1.0;
+        let targetScaleFactor = 1.0;
+        const MIN_SCALE = 0.5;
+        const MAX_SCALE = 6.0;
+        
+        let mouseY = 0;
+        let mouseX = 0;
+        let isMouseDown = false;
+        let mouseScaleFactor = 1.0;
+        
+        let handScaleFactor = null;
+        let handsInstance = null;
+        let cameraActive = false;
+
+        const params = {
+            template: currentTemplate,
+            particleColor: '#1931bf',
+            particleSize: 0.05,
+            currentScale: 1.0,
+            controlMode: 'Mouse Y Position',
+            inputSource: 'Mouse'
+        };
+
+        // --- Core Three.js Setup ---
+
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 10;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', onWindowResize);
+            log('✓ Three.js initialized', 'success');
+        }
+
+        function generatePositions(template) {
+            positions = new Float32Array(particleCount * 3);
+            
+            for (let i = 0; i < particleCount; i++) {
+                const i3 = i * 3;
+                let x = 0, y = 0, z = 0;
+
+                switch (template) {
+                    case 'Heart': {
+                        const t = Math.random() * Math.PI * 2;
+                        const r = 2.5 + Math.random() * 0.5;
+                        x = r * (16 * Math.sin(t) ** 3);
+                        y = r * (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+                        z = (Math.random() - 0.5) * 40;
+                        x /= 50; 
+                        y /= 50;
+                        break;
+                    }
+                    case 'Saturn': {
+                        if (i < particleCount * 0.4) {
+                            const radius = 2;
+                            const phi = Math.acos(Math.random() * 2 - 1);
+                            const theta = Math.random() * Math.PI * 2;
+                            x = radius * Math.sin(phi) * Math.cos(theta);
+                            y = radius * Math.sin(phi) * Math.sin(theta);
+                            z = radius * Math.cos(phi);
+                        } else { 
+                            const innerR = 3;
+                            const outerR = 5;
+                            const ringR = innerR + Math.random() * (outerR - innerR);
+                            const theta = Math.random() * Math.PI * 2;
+                            x = ringR * Math.cos(theta);
+                            y = (Math.random() - 0.5) * 0.1;
+                            z = ringR * Math.sin(theta);
+                        }
+                        break;
+                    }
+                    case 'Fireworks': {
+                        const radius = Math.random() * 0.2; 
+                        const phi = Math.acos(Math.random() * 2 - 1);
+                        const theta = Math.random() * Math.PI * 2;
+                        x = radius * Math.sin(phi) * Math.cos(theta);
+                        y = radius * Math.sin(phi) * Math.sin(theta);
+                        z = radius * Math.cos(phi) + 5;
+                        break;
+                    }
+                    case 'Flower': {
+                        const petals = 8;
+                        const angle = Math.random() * Math.PI * 2;
+                        const petalRadius = Math.abs(Math.sin(petals * angle));
+                        const dist = Math.random() * 3 * petalRadius;
+                        x = dist * Math.cos(angle);
+                        y = dist * Math.sin(angle);
+                        z = (Math.random() - 0.5) * 0.5;
+                        break;
+                    }
+                    case 'Buddha Statue': {
+                        const height = (Math.random() - 0.5) * 8;
+                        const bodyWidth = Math.max(0, 2 - Math.abs(height) * 0.2);
+                        const rad = Math.random() * bodyWidth;
+                        const ang = Math.random() * Math.PI * 2;
+                        x = rad * Math.cos(ang);
+                        y = height;
+                        z = rad * Math.sin(ang);
+                        break;
+                    }
+                    default: {
+                        const r = Math.random() * 5;
+                        const p = Math.acos(Math.random() * 2 - 1);
+                        const th = Math.random() * Math.PI * 2;
+                        x = r * Math.sin(p) * Math.cos(th);
+                        y = r * Math.sin(p) * Math.sin(th);
+                        z = r * Math.cos(p);
+                        break;
+                    }
+                }
+
+                positions[i3] = x;
+                positions[i3 + 1] = y;
+                positions[i3 + 2] = z;
+            }
+            return positions;
+        }
+
+        function updateParticleSystem(newTemplate = currentTemplate) {
+            currentTemplate = newTemplate;
+            const newPositions = generatePositions(currentTemplate);
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+
+            const material = new THREE.PointsMaterial({
+                color: new THREE.Color(params.particleColor),
+                size: params.particleSize,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            if (particleSystem) {
+                scene.remove(particleSystem);
+                if (particleSystem.geometry) particleSystem.geometry.dispose();
+                if (particleSystem.material) particleSystem.material.dispose();
+            }
+            
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        function initGUI() {
+            const gui = new dat.GUI({ autoPlace: false });
+            document.getElementById('gui-container').appendChild(gui.domElement);
+
+            gui.add(params, 'template', ['Heart', 'Saturn', 'Fireworks', 'Flower', 'Buddha Statue']).name('Template').onChange(updateParticleSystem);
+            gui.addColor(params, 'particleColor').name('Color').onChange(value => {
+                if (particleSystem) particleSystem.material.color.set(value);
+            });
+            gui.add(params, 'particleSize', 0.01, 0.5).name('Size').onChange(value => {
+                if (particleSystem) particleSystem.material.size = value;
+            });
+            gui.add(params, 'controlMode', ['Mouse Y Position', 'Click & Drag', 'Scroll Wheel']).name('Mouse Control').onChange(updateStatusMessage);
+            gui.add(params, 'inputSource').name('Input Source').listen();
+            gui.add(params, 'currentScale', MIN_SCALE, MAX_SCALE).name('Current Scale').listen();
+            
+            log('✓ GUI initialized', 'success');
+        }
+
+        // --- Mouse Control ---
+
+        function updateStatusMessage() {
+            const statusDiv = document.getElementById('status-message');
+            let mouseMsg = params.controlMode === 'Mouse Y Position' ? 'Mouse: Move UP/DOWN' :
+                          params.controlMode === 'Click & Drag' ? 'Mouse: Click & drag UP/DOWN' :
+                          'Mouse: Scroll UP/DOWN';
+            const handMsg = cameraActive ? 'Hands: Active ✓' : 'Hands: Mouse only';
+            statusDiv.textContent = `${mouseMsg} | ${handMsg}`;
+        }
+
+        function initMouseTracking() {
+            const cursor = document.getElementById('mouse-cursor');
+
+            document.addEventListener('mousemove', (e) => {
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+                cursor.style.left = mouseX + 'px';
+                cursor.style.top = mouseY + 'px';
+
+                if (params.controlMode === 'Mouse Y Position') {
+                    mouseScaleFactor = MIN_SCALE + ((1 - mouseY / window.innerHeight) * (MAX_SCALE - MIN_SCALE));
+                } else if (params.controlMode === 'Click & Drag' && isMouseDown) {
+                    mouseScaleFactor = MIN_SCALE + ((1 - mouseY / window.innerHeight) * (MAX_SCALE - MIN_SCALE));
+                }
+            });
+
+            document.addEventListener('mousedown', () => {
+                isMouseDown = true;
+                cursor.style.borderColor = '#00ffff';
+                cursor.style.transform = 'scale(1.5)';
+            });
+
+            document.addEventListener('mouseup', () => {
+                isMouseDown = false;
+                cursor.style.borderColor = '#1931bf';
+                cursor.style.transform = 'scale(1)';
+                if (params.controlMode === 'Click & Drag') mouseScaleFactor = 1.0;
+            });
+
+            document.addEventListener('wheel', (e) => {
+                if (params.controlMode === 'Scroll Wheel') {
+                    e.preventDefault();
+                    mouseScaleFactor = Math.max(MIN_SCALE, Math.min(MAX_SCALE, mouseScaleFactor - e.deltaY * 0.001));
+                }
+            }, { passive: false });
+
+            log('✓ Mouse control initialized', 'success');
+        }
+
+        // --- MediaPipe Loading with Fallbacks ---
+
+        const CDN_SOURCES = [
+            {
+                name: 'jsDelivr (Primary)',
+                hands: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469476/hands.js',
+                camera: 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js',
+                modelPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469476/'
+            },
+            {
+                name: 'jsDelivr (Latest)',
+                hands: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js',
+                camera: 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js',
+                modelPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/'
+            },
+            {
+                name: 'UNPKG',
+                hands: 'https://unpkg.com/@mediapipe/hands@0.4.1675469476/hands.js',
+                camera: 'https://unpkg.com/@mediapipe/camera_utils@0.3/camera_utils.js',
+                modelPath: 'https://unpkg.com/@mediapipe/hands@0.4.1675469476/'
+            }
+        ];
+
+        let currentCDNIndex = 0;
+        let currentModelPath = CDN_SOURCES[0].modelPath;
+
+        function loadScript(src, timeout = 10000) {
+            return new Promise((resolve, reject) => {
+                log(`Loading: ${src.split('/').pop()}...`);
+                const script = document.createElement('script');
+                script.src = src;
+                
+                const timer = setTimeout(() => {
+                    reject(new Error(`Timeout loading ${src}`));
+                }, timeout);
+                
+                script.onload = () => {
+                    clearTimeout(timer);
+                    log(`✓ Loaded: ${src.split('/').pop()}`, 'success');
+                    resolve();
+                };
+                
+                script.onerror = (error) => {
+                    clearTimeout(timer);
+                    log(`✗ Failed: ${src.split('/').pop()}`, 'error');
+                    reject(new Error(`Failed to load ${src}`));
+                };
+                
+                document.head.appendChild(script);
+            });
+        }
+
+        async function loadMediaPipeWithFallback() {
+            for (let i = currentCDNIndex; i < CDN_SOURCES.length; i++) {
+                const source = CDN_SOURCES[i];
+                log(`Trying CDN: ${source.name}`, 'warning');
+                
+                try {
+                    await loadScript(source.hands);
+                    await loadScript(source.camera);
+                    
+                    // Wait for globals to be available
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    if (typeof Hands !== 'undefined' && typeof Camera !== 'undefined') {
+                        currentModelPath = source.modelPath;
+                        log(`✓ MediaPipe loaded from ${source.name}`, 'success');
+                        return true;
+                    }
+                } catch (error) {
+                    log(`✗ ${source.name} failed: ${error.message}`, 'error');
+                    if (i < CDN_SOURCES.length - 1) {
+                        log(`→ Trying next CDN...`, 'warning');
+                    }
+                }
+            }
+            
+            throw new Error('All CDN sources failed');
+        }
+
+        // --- Hand Tracking ---
+
+        async function initMediaPipe() {
+            try {
+                log('=== HAND TRACKING INITIALIZATION ===');
+                
+                // Test network
+                const networkOk = await testNetworkConnectivity();
+                if (!networkOk) {
+                    throw new Error('Network connectivity issue - check your internet');
+                }
+
+                // Load MediaPipe
+                if (typeof Hands === 'undefined') {
+                    log('MediaPipe not loaded, attempting to load...');
+                    await loadMediaPipeWithFallback();
+                }
+
+                // Check camera
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    throw new Error('Camera not supported in this browser');
+                }
+
+                log('Requesting camera permission...');
+                const videoElement = document.getElementById('camera-feed');
+
+                handsInstance = new Hands({
+                    locateFile: (file) => currentModelPath + file
+                });
+                
+                handsInstance.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence: 0.5
+                });
+
+                handsInstance.onResults(onHandResults);
+
+                const cameraMediaPipe = new Camera(videoElement, {
+                    onFrame: async () => {
+                        try {
+                            await handsInstance.send({image: videoElement});
+                        } catch (error) {
+                            console.error('Frame processing error:', error);
+                        }
+                    },
+                    width: 640,
+                    height: 480
+                });
+                
+                await cameraMediaPipe.start();
+                cameraActive = true;
+                log('✓✓✓ HAND TRACKING ACTIVE! ✓✓✓', 'success');
+                updateStatusMessage();
+                document.getElementById('enable-camera-btn').style.display = 'none';
+                
+                setTimeout(() => {
+                    diagnostics.style.display = 'none';
+                    document.getElementById('hide-diagnostics-btn').textContent = 'Show Debug Info';
+                }, 3000);
+                
+            } catch (error) {
+                log(`✗ Hand tracking failed: ${error.message}`, 'error');
+                log('→ Mouse control will continue working', 'info');
+                updateStatusMessage();
+                
+                const btn = document.getElementById('enable-camera-btn');
+                btn.style.display = 'block';
+                btn.textContent = 'Retry Hand Tracking';
+                btn.disabled = false;
+            }
+        }
+
+        function onHandResults(results) {
+            if (results.multiHandLandmarks?.length > 0) {
+                let totalClosure = 0;
+
+                results.multiHandLandmarks.forEach(landmarks => {
+                    const thumb = landmarks[4];
+                    const index = landmarks[8];
+                    const dx = thumb.x - index.x;
+                    const dy = thumb.y - index.y;
+                    const dz = (thumb.z || 0) - (index.z || 0);
+                    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    totalClosure += 1 - Math.min(1, distance / 0.15);
+                });
+
+                handScaleFactor = MIN_SCALE + ((totalClosure / results.multiHandLandmarks.length) * (MAX_SCALE - MIN_SCALE));
+                params.inputSource = 'Hands';
+            } else {
+                handScaleFactor = null;
+                params.inputSource = 'Mouse';
+            }
+        }
+
+        // --- Animation Loop ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            targetScaleFactor = handScaleFactor !== null ? handScaleFactor : mouseScaleFactor;
+            currentScaleFactor += (targetScaleFactor - currentScaleFactor) * 0.1;
+            params.currentScale = currentScaleFactor;
+
+            if (particleSystem) {
+                particleSystem.scale.set(currentScaleFactor, currentScaleFactor, currentScaleFactor);
+                particleSystem.rotation.y += 0.001;
+                particleSystem.rotation.x += 0.0005;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Start Everything ---
+        
+        (async function init() {
+            try {
+                initThree();
+                initGUI();
+                updateParticleSystem();
+                initMouseTracking();
+                updateStatusMessage();
+                animate();
+                
+                log('✓ Core systems ready', 'success');
+                log('Mouse control active - move your mouse!', 'success');
+                
+                // Button handler
+                document.getElementById('enable-camera-btn').addEventListener('click', () => {
+                    document.getElementById('enable-camera-btn').disabled = true;
+                    document.getElementById('enable-camera-btn').textContent = 'Loading...';
+                    initMediaPipe();
+                });
+                
+                // Auto-try after 2 seconds
+                setTimeout(initMediaPipe, 2000);
+                
+            } catch (error) {
+                log(`✗ FATAL: ${error.message}`, 'error');
+            }
+        })();
+    </script>
+</body>
+</html>
